@@ -1,0 +1,363 @@
+' {$STAMP BS2pe}
+' {$PBASIC 2.5}
+'
+' This program is the main program for testing out the circuit
+' and sensors. It is a menu driven program that is designed to
+' be run when the circuitboad is connected to a computer.  It
+' can not be used during the balloon flight to collect data;
+' however, the number of sensors used must be set and the memory
+' must be reset using this program before the "LaunchDay"
+' program can be used to collect data during the balloon flight.
+' This program performs three tasks:
+'     1) Erase and Reset Memory.  This option is used to set the
+'            number of sensors to be used and the number of EEprom
+'            chips installed, before it overwrites the bits in
+'            memory with all 1's.  The memory reset takes
+'            approximately 5 minutes per chip, but this can be
+'            considered optional and the program can be reset
+'            (redownloaded) after the number of sensors and chips
+'            has been set.
+'            Note: the newer circuitboard measures the battery
+'            power on sensor input #1, so this must be taken into
+'            account when setting the total number of sensors.
+'     2) Collect Data.  This option is used to test the sensors
+'            and A/D converter.  The program will continue to
+'            collect data until its memory is full, so once the
+'            sensors are shown to work, the program can be reset
+'            (redownloaded). The output from each sensor will be
+'            displayed on the computer screen as a number between
+'            0 to 4095.  This number represents the 12-bit output
+'            from the A/D Converter of a voltage between 0V and 5V.
+'            You will need to see the datasheets for your sensors
+'            to know what the analog voltage readings mean.
+'     3) Read Data in Memory.  This option is used to test the
+'            EEprom memory chips. Once data has been collected
+'            it should be stored in memory. This option reads all
+'            of the data currently stored in memory. The program
+'            will quit displaying the memory and return to the
+'            main menu once it gets to the last memory location
+'            containing sensor data.
+'
+' This version of the code utilizes 4 EEprom memory chips.
+'
+'----------------------------------------------------
+'*** STAMP PINS ***
+'----------------------------------------------------
+
+'PINS FOR ADC
+ADCout PIN 12
+ADCCS  PIN 14
+CLK    PIN 15
+ADCin  PIN 13
+
+'Out Pin Connected to Red LED
+RedLED PIN  2
+OUTPUT RedLED    'Set Pin 7 (RedLED) as an output pin
+
+'----------------------------------------------------
+'*** Program Constants ***
+'----------------------------------------------------
+
+'CONSTANTS FOR SETTING BAUD RATE FOR SERIAL COMMANDS
+T9600 CON 84
+TXbaud CON T9600
+
+'SET VALUES TO MANAGE EXTERNAL EEPROM
+Data_Address_Start VAR   Word
+Data_Address_Max   VAR   Word
+Memfull            VAR   Byte
+
+'SET VALUES TO CONTROL LED OUTPUT
+IsOn       CON   1    'LED will be on
+IsOff      CON   0    'LED will be off
+
+'----------------------------------------------------
+'*** Program Variables ***
+'----------------------------------------------------
+
+Datapoint_Addr   VAR   Word  'used to keep tract of memory locations in RAM for data.
+Datapoint_Count  VAR   Word  'used to control over the loop total number of loops.
+datapt           VAR   Word  'used to hold values read from memory
+datasets         VAR   Word  'used to count number of datasets read from memory
+choice           VAR   Byte  'used to store input from user (Byte = 8 Bits)
+check            VAR   Byte  'used to store input from user (Byte = 8 Bits)
+UsedChips        VAR   Byte  'Number of 128kb EEProm memory chips used (= 1-4)
+UsedSensors      VAR   Byte  'Number of sensors who value is stored in memory
+points           VAR   Byte  'used to count number of data points read in each from memory
+i                VAR   Byte  'loop counter
+chip             VAR   Byte  'number of current memory chip being used to store data (=1-4)
+block            VAR   Byte  'number of current block on memory chip being used to store data (=0-1)
+locate           VAR   Byte  'used as a control string with I2COUT to write to correct chip and block
+readchip         VAR   Byte  'number of memory chip being read from (=1-4)
+
+ADCcontrol       VAR  Byte  'used to set ACD Control Pin array (Binary sequence)
+  'ADC CONTROL PIN ARRAY (Binary sequence) -- choose which analog inputs are read.
+  ' Bit 7 = 1 Defines the beginning of the control byte.
+  ' Bit 6,5,4 = Binary number specifying analog inputs 0-7.  (Bit 6 is MSB.)
+  ' Bit 3 = 0 Sets  the full scale input voltage range.
+  ' Bit 2 = 0 Set input range to unipolar.
+  ' Bit 1 = 0 Normal operation (always on).
+  ' Bit 0 = 1 External clock operation.
+  ' Use ACDcontrol = 129 + [number of analog input (0-7)]*16
+
+'----------------------------------------------------
+'*** Main Program ***
+'----------------------------------------------------
+
+Main:
+
+  'Blink LED on/off 4 times (quickly) when program starts
+  FOR i = 1 TO 4
+    RedLED = IsOn    'Turn on Red LED at Pin 7.
+    PAUSE 150        'Leave Red LED on for 0.15s
+    RedLED = IsOff   'Turn off Red LED at Pin 7.
+    PAUSE 150        'Wait 0.15s before reading next data set.
+  NEXT
+
+  DO
+    'Determine number of datapoints currently in memory and number of sensors previously used.
+    STORE 0  'Go to slot 0
+    READ $00, Word Datapoint_Count        'Read number of datasets stored in on last EEProm chip used
+    READ $02, Word Data_Address_Start     'Read address of next available memory slot in EEPROM
+    READ $04, UsedSensors                 'Read the number of sensors used
+    READ $05, locate                      'Read number of blocks and chips used for external EEPROM
+    READ $06, UsedChips                   'Read the number of chips available to store data
+    IF(locate>=8) THEN
+      block = 1                           'Each EEPROM has 2 block.  (block = 0, 1)
+      chip = ((locate-8)/2) + 1           'Determine chip last used for memory.  (chip = 1, 2, 3, or 4)
+    ELSE
+      block = 0                           'Each EEPROM has 2 block.  (block = 0, 1)
+      chip = locate/2 + 1                 'Determine chip last used for memory.  (chip = 1, 2, 3, or 4)
+    ENDIF
+    IF((UsedChips<1) OR (UsedChips>4)) THEN
+      UsedChips = 1
+    ENDIF
+    Data_Address_Max = $FFFE - (2*UsedSensors)  'Set the value for the maximum address that can be used
+    Datapoint_Addr = Data_Address_Start   'Set start location for storing data
+
+    DEBUG CLS
+    DEBUG "Next Addr = ", DEC Data_Address_Start, " in chip #", DEC chip, " out of ", DEC UsedChips, " chips, Block #", DEC block, CR
+    IF((Data_Address_Start>=Data_Address_Max) AND (chip=UsedChips) AND (block=1)) THEN  ' Memory is full.  Need to Run reset program before collecting more data.
+      Memfull = 1
+      DEBUG "Memory is full.", CR
+    ELSE   'Space in memory
+      Memfull = 0
+    ENDIF
+
+    'Display menu in DEBUG Window.
+'    DEBUG "Program Uses 4x128kB External EEPROM ", DEC Data_Address_Start, CR
+    DEBUG CR, CR, CR, "      Main Menu", CR, CR
+    DEBUG " 1) Erase and Reset Memory", CR
+    DEBUG " 2) Collect Data from ", DEC UsedSensors," Sensors", CR
+    DEBUG " 3) Read Data in Memory", CR
+    DEBUG " 4) Exit Program", CR, CR
+
+    'Note:  serout = serial output, serin = serial input
+    SEROUT 16, TXbaud, ["      Choice? "]  'Ask user for input
+    SERIN  16, TXbaud, [DEC choice]   'Read in response (1 byte)
+    DEBUG CLS
+
+    SELECT choice
+      CASE 1  'Erase and Reset memory
+        SEROUT 16, TXbaud, ["Reset memory (Y/N)? "]  'Ask user for input
+        SERIN  16, TXbaud, [STR check\1]   ' Read in response
+        DEBUG CR, CR
+        IF (check="Y") THEN     ' User input "Y" to reset memory
+          GOSUB RESET_MEMORY
+        ENDIF
+      CASE 2  'Beginning Data Collection
+        IF(Memfull = 0) THEN  'Space in memory
+          GOSUB COLLECT_DATA                        ' Collect Data To Store in memory
+        ELSE    ' Memory is full.  Need to Run reset program before collecting more data.
+          DEBUG "Memory is full.", CR
+          PAUSE 2000
+        ENDIF
+      CASE 3  'Reading Data stored in memory
+        GOSUB READ_MEMORY
+    ENDSELECT
+
+  LOOP UNTIL(choice = 4)
+  DEBUG CR, "End of program ",CR
+END      'End of main program
+
+'----------------------------------------------------
+'*** RESET_MEMORY Subroutine ***
+'----------------------------------------------------
+
+RESET_MEMORY:
+
+  SEROUT 16, TXbaud, ["How many sensors will be used? "]  'Ask user for input
+  SERIN  16, TXbaud, [DEC UsedSensors]   ' Read in response
+  IF (UsedSensors < 1) THEN
+    UsedSensors = 1
+  ENDIF
+  SEROUT 16, TXbaud, ["How many memory chips are available? "]  'Ask user for input
+  SERIN  16, TXbaud, [DEC UsedChips]   ' Read in response
+  IF (UsedChips < 1) THEN
+    UsedChips = 1
+  ENDIF
+  DEBUG CR, "Erasing memory. 5 min/chip", CR
+  STORE 0  'Go to slot 0
+  WRITE $00, Word $0000     ' Set count of datapoints stored in EEPROM to zero
+  WRITE $02, Word $0000     ' Set starting address for writes to EEPROM to $00
+  WRITE $04, UsedSensors    ' Write the number of sensors to be used the next time data is gathered
+  WRITE $05, $00            ' Write the location to be used the next time data is gathered
+  WRITE $06, UsedChips      ' Write the number of chips available to store data
+
+  datapt = $FFFF
+  FOR chip = 1 TO UsedChips
+    FOR block = 0 TO 1
+      locate = (8*block) + (2*(chip-1))
+      DEBUG "Chip #", DEC chip, " Block #", DEC block, CR
+      FOR Datapoint_Addr = 0 TO $FFFD STEP 2
+        I2COUT 0, ($A0+locate), Datapoint_Addr.HIGHBYTE  \Datapoint_Addr.LOWBYTE, [datapt.HIGHBYTE, datapt.LOWBYTE]
+        PAUSE 2
+      NEXT
+      Datapoint_Addr = $FFFE
+      I2COUT 0, ($A0+locate), Datapoint_Addr.HIGHBYTE  \Datapoint_Addr.LOWBYTE, [datapt.HIGHBYTE, datapt.LOWBYTE]
+    NEXT
+  NEXT
+
+  RedLED = IsOn    'Turn on Red LED at Pin 2.
+  PAUSE 500        'Leave Red LED on for 0.5s
+  RedLED = IsOff   'Turn off Red LED at Pin 2.
+
+  DEBUG CR, "Memory erased!",CR
+
+RETURN
+
+'----------------------------------------------------
+'*** Collect Data from all Sensors Subroutine ***
+'----------------------------------------------------
+
+COLLECT_DATA:
+
+  'Calibration Formulas
+  'DEBUG "Actual voltages: V = (value*5/4095)", CR
+  'DEBUG "For Temperature Sensor: T = 100*(V-0.5) [in Celesius]", CR                'Sensor should read 610 at 75d F, change 10 = 2.2d F
+  'DEBUG "For Pressure Sensor: P = (V-0.5)/0.133  [in PSI, 1 atm = 14.70 psi]", CR  'Sensor should read 2011 at 1 atm, change 10 = 0.092 psi
+
+  DEBUG CR, "Starting Data Collection", CR  'Display  message on screen
+  HIGH ADCCS             'Output to A/D Converter is high.  Goes low to read data.
+
+  DO                     'Loop until through obtaining data.
+
+    'Sample rate is set by the sum of both PAUSE Statements.
+    RedLED = IsOn        'Turn on Red LED to indicated that data is being read
+    PAUSE 185            'Leave Red LED on for 0.185s
+    RedLED = IsOff       'Turn off Red LED
+    PAUSE 400            'Wait 0.4s before reading next data set.
+    DEBUG CR, DEC5 (Datapoint_Count+1), ") Chip #", DEC chip, " Block #", DEC block, " WRITE Addr = ",DEC5 Datapoint_Addr, TAB     'Display Number for current set of data being read from memory
+
+    'Read the data from the A/D Converter
+    FOR points = 1 TO UsedSensors
+
+      'Read input from A/D Converter for a single sensor
+      GOSUB READ_DATAPT
+      'Display value of data collected in DEBUG window.
+      DEBUG DEC4 datapt, TAB
+
+      'Write input value to Memory
+      I2COUT 0, $A0+locate, Datapoint_Addr.HIGHBYTE  \Datapoint_Addr.LOWBYTE, [datapt.HIGHBYTE, datapt.LOWBYTE]
+      Datapoint_Addr = Datapoint_Addr + 2    'Move by one word (2 bytes) in RAM
+    NEXT
+
+    'Increment counter and available address in memory
+    Datapoint_Count = Datapoint_Count + 1    'Count number of sets of data taken
+    IF(Datapoint_Addr >= Data_Address_Max) THEN
+      IF(block = 0) THEN  'Move to Second block of 64Kb in EEPROM chip
+        block = 1
+        locate = 2*(chip-1) + 8
+        STORE 0
+        WRITE $05, locate           'Write value of next location
+        Datapoint_Addr = $0000
+      ELSEIF(chip<UsedChips) THEN              'Second block of 64kb in EEPROM is full  -> move on to next chip
+        chip = chip + 1
+        block = 0
+        locate = 2*(chip-1)
+        STORE 0
+        WRITE $05, locate
+        Datapoint_Count = $0000
+        Datapoint_Addr = $0000
+      ELSE
+        Memfull = 1       'Set memory full to true
+      ENDIF
+    ENDIF
+
+    STORE 0                                  'Set slot to zero for counting
+    WRITE $00, Word Datapoint_Count          'Write number of datasets stored in EEPROM
+    WRITE $02, Word Datapoint_Addr           'Write current address for starting writes to EEPROM
+
+  LOOP UNTIL (Memfull=1)  'Stop the loop after when memory is fullrite number of datapoints and sensors to EEPROM
+
+  DEBUG CR, "Memory Full.", CR  'Display ending message on screen
+
+RETURN
+
+'----------------------------------------------------
+'*** Read Single Data Point from one Sensor ***
+'----------------------------------------------------
+
+READ_DATAPT:
+
+  datapt = $0000     'Zero the datapoint var
+  ADCcontrol = (points-1)*16 + 129  'Set ACD Control Pin Array (Binary sequence) to chose input channels
+  LOW ADCCS          'Data is sent when CS = 0
+  SHIFTOUT ADCin,CLK,MSBFIRST,[ADCcontrol\8]  'Set control array for ADC
+  SHIFTOUT ADCin,CLK,MSBFIRST,[0\4]           'Output from ADC starts after 4 more clock cycles.
+  SHIFTIN ADCout,CLK,MSBPOST,[datapt\12]      'Read input from ADC
+  HIGH ADCCS         'No longer receive data from A/D when CS = 0
+
+RETURN
+
+'----------------------------------------------------
+'*** READ_MEMORY Subroutine ***
+'----------------------------------------------------
+
+READ_MEMORY:
+
+  'Check if there is data in memory
+  IF (Datapoint_Count = 0) THEN
+    SEROUT 16, TXbaud, ["No data in memory.  See values anyway (Y/N)? "]  'Ask user for input
+    SERIN  16, TXbaud, [STR check\1]   ' Read in response
+    IF (check="Y") THEN     ' User input "Y" to reset memory
+      IF (UsedSensors = 0) THEN
+        UsedSensors = 1
+      ENDIF
+      Datapoint_Count = ($FFFE) / UsedSensors
+    ENDIF
+  ENDIF
+
+  'Read data from memory
+  DEBUG CR, "Reading Data", CR  'Display  message on screen
+  datasets = 1
+  Datapoint_Addr = $0000
+  readchip = 1
+  block = 0
+  locate = 0
+  DO WHILE((datasets <= Datapoint_Count) OR (readchip < chip))
+    DEBUG CR, DEC5 datasets, ") Chip #", DEC readchip, " Block #", DEC block, " READ Addr = ",DEC5 Datapoint_Addr, TAB     'Display Number for current set of data being read from memory
+    FOR points = 1 TO UsedSensors
+      I2CIN 0, $A1+locate, Datapoint_Addr.HIGHBYTE  \Datapoint_Addr.LOWBYTE, [datapt.HIGHBYTE, datapt.LOWBYTE]
+      DEBUG DEC4 datapt, TAB
+      Datapoint_Addr = Datapoint_Addr + 2   'Move by one word (2 bytes) in RAM
+    NEXT
+    datasets = datasets + 1
+    IF(Datapoint_Addr >= Data_Address_Max) THEN
+      IF(block = 0) THEN  'Move to Second block of 64Kb in EEPROM chip
+        block = 1
+      ELSEIF(readchip<chip) THEN        'Second block of 64kb in EEPROM is full  -> move on to next chip
+        readchip = readchip + 1
+        block = 0
+        datasets = 1
+      ENDIF
+      locate = (8*block) + (2*(readchip-1))
+      Datapoint_Addr = $0000
+    ENDIF
+  LOOP
+
+  DEBUG CR, "End of Data", CR, CR  'Display ending message on screen
+  SEROUT 16, TXbaud, ["Press [Enter]."]  'Ask user for input
+  SERIN  16, TXbaud, [STR check\1]   ' Read in response
+
+RETURN

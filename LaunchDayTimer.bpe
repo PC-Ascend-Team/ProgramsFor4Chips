@@ -1,0 +1,192 @@
+' {$STAMP BS2pe}
+' {$PBASIC 2.5}
+'
+' This program is used to test how long it takes the data acquisition circuit
+' to collect and store data from the sensors.  Using the PAUSE command in the
+' COLLECT_DATA subroutine, it is possible to adjust the time between reads
+' from the sensors.  The PAUSE time accounts for the majority of the time
+' between the sets of data colleted, but this program is used to determine
+' the exact amount of time between data points, which depends on the number
+' of sensors used. The program collects 1000 data points.  You can then use
+' a stopwatch to determine how long it takes.
+'
+'----------------------------------------------------
+'*** STAMP PINS ***
+'----------------------------------------------------
+
+'PINS FOR ADC
+ADCout PIN 12
+ADCCS  PIN 14
+CLK    PIN 15
+ADCin  PIN 13
+
+'Out Pin Connected to Red LED
+RedLED PIN  2
+OUTPUT RedLED    'Set Pin 7 (RedLED) as an output pin
+
+'----------------------------------------------------
+'*** Program Constants ***
+'----------------------------------------------------
+
+'CONSTANTS FOR SETTING BAUD RATE FOR SERIAL COMMANDS
+T9600 CON 84
+TXbaud CON T9600
+
+'SET VALUES TO MANAGE EXTERNAL EEPROM
+MemSize            CON  $FFFF     'Total memory available in EEPROM
+Data_Address_Start VAR   Word
+Data_Address_Max   VAR   Word
+i                  VAR   Byte
+block              VAR   Byte
+Memfull            VAR   Byte
+
+'SET VALUES TO CONTROL LED OUTPUT
+IsOn       CON   1    'LED will be on
+IsOff      CON   0    'LED will be off
+
+'----------------------------------------------------
+'*** Program Variables ***
+'----------------------------------------------------
+
+choice           VAR  Byte  'used to store input from user (Byte = 8 Bits)
+check            VAR  Byte  'used to store input from user (Byte = 8 Bits)
+Datapoint_Addr   VAR  Word  'used to keep ract of memory locations in RAM for data.
+Datapoint_Count  VAR  Word  'used to control over the loop total number of loops.
+Counter          VAR  Word  'used to count number of data points collected
+datapt           VAR  Word  'used to hold values read from memory
+datasets         VAR  Word  'used to count number of datasets read from memory
+UsedSensors      VAR  Byte  'Number of sensors who value is stored in memory
+points           VAR  Byte  'used to count number of data points read in each from memory
+
+ADCcontrol       VAR  Byte  'used to set ACD Control Pin array (Binary sequence)
+  'ADC CONTROL PIN ARRAY (Binary sequence) -- choose which analog inputs are read.
+  ' Bit 7 = 1 Defines the beginning of the control byte.
+  ' Bit 6,5,4 = Binary number specifying analog inputs 0-7.  (Bit 6 is MSB.)
+  ' Bit 3 = 0 Sets  the full scale input voltage range.
+  ' Bit 2 = 0 Set input range to unipolar.
+  ' Bit 1 = 0 Normal operation (always on).
+  ' Bit 0 = 1 External clock operation.
+  ' Use ACDcontrol = 129 + [number of analog input (0-7)]*16
+
+'----------------------------------------------------
+'*** Main Program ***
+'----------------------------------------------------
+
+Main:
+
+  'Determine number of datapoints currently in memory and number of sensors previously used.
+  STORE 0  'Go to slot 0
+  READ $00, Word Datapoint_Count          'Read number of datasets stored in EEPROM
+  READ $02, Word Data_Address_Start       'Read address of next available memory slot in EEPROM
+  READ $04, UsedSensors                   'Read the number of sensors used
+  READ $05, block                         'Read number of blocks used for external EEPROM
+  Data_Address_Max = MemSize - (2*UsedSensors) - 1  'Set the value for the maximum address that can be used
+  Datapoint_Addr = Data_Address_Start  'Set start location for storing data
+
+  IF((Data_Address_Start >= Data_Address_Max) AND (block>0)) THEN  ' Memory is full.  Need to Run reset program before collecting more data.
+    Memfull = 1
+    'Blink LED on/off 4 times (quickly) when program starts
+    FOR i = 1 TO 4
+      RedLED = IsOn    'Turn on Red LED at Pin 7.
+      PAUSE 500        'Leave Red LED on for 0.5s
+      RedLED = IsOff   'Turn off Red LED at Pin 7.
+      PAUSE 200        'Wait 0.2s before reading next data set.
+    NEXT
+    DEBUG "Memory is full.  Run Reset program before collecting more data.", CR
+  ELSE   'Space in memory
+    Memfull = 0
+    IF((Data_Address_Start = $0000) AND (block=0)) THEN    'Initial write to memory.  Pause for 2 minutes.
+      RedLED = IsOn
+      PAUSE 1000
+      RedLED = IsOff
+      PAUSE 1000
+    ENDIF
+    GOSUB COLLECT_DATA         'Collect Data To Store in memory
+    RedLED = IsOn    'Turn on Red LED at Pin 7.
+  ENDIF
+
+END                  'End of main program
+
+'----------------------------------------------------
+'*** Collect Data from all Sensors Subroutine ***
+'----------------------------------------------------
+
+COLLECT_DATA:
+
+  'Calibration Formulas
+  'DEBUG "Actual voltages: V = (value*5/4096)", CR
+  'DEBUG "For Temperature Sensor: T = 100*(V-0.5) [in Celesius]", CR                'Sensor should read 610 at 75d F, change 10 = 2.2d F
+  'DEBUG "For Pressure Sensor: P = (V-0.5)/0.133  [in PSI, 1 atm = 14.70 psi]", CR  'Sensor should read 2011 at 1 atm, change 10 = 0.092 psi
+
+  HIGH ADCCS             'Output to A/D Converter is high.  Goes low to read data.
+  counter = 1
+  DEBUG "Program will read 1000 data points.  Use a stopwatch to determine how long it takes.", CR
+  DEBUG "It is usually around 10-12 minutes.",CR,CR
+  SEROUT 16, TXbaud, ["Input any number and press [Enter] to start test: "]  'Ask user for input
+  SERIN  16, TXbaud, [DEC choice]   'Read in response (1 byte)
+  DEBUG "Start 1000 Points",CR
+
+  DO                     'Loop until through obtaining data.
+
+    'Sample rate is set by the sum of both PAUSE Statements.
+    RedLED = IsOn        'Turn on Red LED to indicated that data is being read
+    PAUSE 185            'Leave Red LED on for 0.185s
+    RedLED = IsOff       'Turn off Red LED
+    PAUSE 400            'Wait 0.4s before reading next data set.
+
+    'Read the data from the A/D Converter
+    FOR points = 1 TO UsedSensors
+
+      'Read input from A/D Converter for a single sensor
+      GOSUB READ_DATAPT
+
+      'Write input value to Memory
+      I2COUT 0, $A0+block, Datapoint_Addr.HIGHBYTE  \Datapoint_Addr.LOWBYTE, [datapt.HIGHBYTE, datapt.LOWBYTE]
+      Datapoint_Addr = Datapoint_Addr + 2    'Move by one word (2 bytes) in RAM
+    NEXT
+
+    IF(Datapoint_Addr >= Data_Address_Max) THEN
+      IF(block = 0) THEN  'Move to Second block of 64Kb in EEPROM
+        block = $08
+        STORE 0
+        WRITE $05, block           'Write value of next block
+        Datapoint_Addr = $0000
+      ELSE                'Second block of 64kb in EEPROM is full
+        Memfull = 1       'Set memory full to true
+      ENDIF
+    ENDIF
+
+    'Increment counter and available address in memory
+    Datapoint_Count = Datapoint_Count + 1    'Count number of sets of data taken
+    counter = counter + 1
+    STORE 0                                  'Set slot to zero for counting
+    WRITE $00, Word Datapoint_Count          'read number of datasets stored in EEPROM
+    WRITE $02, Word Datapoint_Addr           'read current address for starting writes to EEPROM
+
+    IF(counter = 960) THEN
+       DEBUG CR, "  At 960 now.", CR, CR
+    ENDIF
+    IF(counter = 980) THEN
+       DEBUG CR, "  At 980 now.", CR, CR
+    ENDIF
+
+  LOOP UNTIL (counter>=1000)  'Stop the loop after when memory is fullrite number of datapoints and sensors to EEPROM
+'  LOOP UNTIL (Memfull=1)  'Stop the loop after when memory is fullrite number of datapoints and sensors to EEPROM
+  DEBUG "End 1000 Points.",CR
+RETURN
+
+'----------------------------------------------------
+'*** Read Single Data Point from one Sensor ***
+'----------------------------------------------------
+
+READ_DATAPT:
+
+  datapt = $0000     'Zero the datapoint var
+  ADCcontrol = (points-1)*16 + 129  'Set ACD Control Pin Array (Binary sequence) to chose input channels
+  LOW ADCCS          'Data is sent when CS = 0
+  SHIFTOUT ADCin,CLK,MSBFIRST,[ADCcontrol\8]  'Set control array for ADC
+  SHIFTOUT ADCin,CLK,MSBFIRST,[0\4]           'Output from ADC starts after 4 more clock cycles.
+  SHIFTIN ADCout,CLK,MSBPOST,[datapt\12]      'Read input from ADC
+  HIGH ADCCS         'No longer receive data from A/D when CS = 1
+
+RETURN
